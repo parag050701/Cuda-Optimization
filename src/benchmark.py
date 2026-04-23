@@ -73,34 +73,49 @@ def run_binary(binary: Path, env_overrides: dict | None = None,
     return result.returncode == 0, result.stdout, result.stderr
 
 
-def collect_ncu_metrics(binary: Path, metrics: list[str]) -> dict:
+def collect_ncu_metrics(binary: Path,
+                        metrics: list[str] | None = None,
+                        kernel_regex: str | None = None,
+                        launch_count: int | None = None,
+                        env_overrides: dict | None = None) -> dict:
     """
     Run Nsight Compute (ncu) to collect hardware counters.
     Returns empty dict if ncu is not installed or fails.
-    Key metrics for memory-bound analysis:
-      - l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum  (global loads)
-      - dram__bytes.sum                                (DRAM bandwidth)
-      - smsp__sass_thread_inst_executed_op_fadd_pred_on.sum (FP ops)
+
+    Args:
+      binary:        path to the compiled benchmark binary to profile
+      metrics:       list of ncu metric names; a sensible default set if None
+      kernel_regex:  restrict profiling to kernels matching this regex
+                     (`-k regex:<pattern>`). Useful to skip the naive
+                     reference kernel we also launch for correctness checks.
+      launch_count:  only profile the first N matching launches; big speedup
+                     when the binary loops 100+ iterations for timing.
     """
     if not metrics:
         metrics = [
             "dram__bytes.sum",
             "l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum",
             "smsp__sass_thread_inst_executed_op_fadd_pred_on.sum",
-            "sm__occupancy_max_warps_active.avg.pct_of_peak_sustained_active",
+            "sm__warps_active.avg.pct_of_peak_sustained_active",
         ]
 
-    metric_str = ",".join(metrics)
-    cmd = [
-        "ncu",
-        "--metrics", metric_str,
-        "--csv",
-        "--target-processes", "all",
-        str(binary),
-    ]
+    cmd = ["ncu",
+           "--metrics", ",".join(metrics),
+           "--csv",
+           "--target-processes", "all"]
+    if kernel_regex:
+        cmd += ["-k", f"regex:{kernel_regex}"]
+    if launch_count:
+        cmd += ["--launch-count", str(launch_count)]
+    cmd.append(str(binary))
+
+    env = os.environ.copy()
+    if env_overrides:
+        env.update({k: str(v) for k, v in env_overrides.items()})
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                env=env, timeout=180)
         if result.returncode != 0:
             return {}
         return _parse_ncu_csv(result.stdout)
